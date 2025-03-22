@@ -1,0 +1,15 @@
+# Python defaults
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+.env
+# Custom for SocialInsightAI
+config.py
+*.db
+models/*
