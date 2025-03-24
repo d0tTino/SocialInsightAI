@@ -52,6 +52,13 @@ A sentiment analysis and social media posting application that analyzes messages
    python sentiment_bot.py
    ```
 
+6. Target specific platforms:
+   ```
+   python sentiment_bot.py --platform bluesky
+   python sentiment_bot.py --platform x
+   python sentiment_bot.py --platform both
+   ```
+
 ## Features
 
 - Batch processing for efficiency
