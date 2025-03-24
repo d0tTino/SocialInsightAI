@@ -31,49 +31,68 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         return None
 
-def authenticate_platforms():
-    """Authenticate with X and Bluesky platforms, returning success status"""
+def authenticate_platforms(target_platforms=None):
+    """Authenticate with X and Bluesky platforms, returning success status
+    
+    Args:
+        target_platforms (list): List of platforms to authenticate with ('x', 'bluesky', or both)
+    """
     global x_client, bsky_client
     platforms_available = {"x": False, "bluesky": False}
     
-    # X setup
-    try:
-        if all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
-                X_API_SECRET != "YOUR_X_API_SECRET_HERE",
-                X_ACCESS_TOKEN != "YOUR_X_ACCESS_TOKEN_HERE", 
-                X_ACCESS_TOKEN_SECRET != "YOUR_X_ACCESS_TOKEN_SECRET_HERE"]):
-            x_client = tweepy.Client(
-                consumer_key=X_API_KEY, 
-                consumer_secret=X_API_SECRET,
-                access_token=X_ACCESS_TOKEN, 
-                access_token_secret=X_ACCESS_TOKEN_SECRET
-            )
-            platforms_available["x"] = True
-            logger.info("Successfully authenticated with X")
-        else:
-            logger.warning("X credentials not configured. X posting will be skipped.")
-    except Exception as e:
-        logger.error(f"X authentication error: {e}")
+    # Skip authentication for platforms not in target_platforms
+    if target_platforms and 'x' not in target_platforms:
+        logger.info("X platform not selected, skipping authentication")
+    else:
+        # X setup
+        try:
+            if all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
+                    X_API_SECRET != "YOUR_X_API_SECRET_HERE",
+                    X_ACCESS_TOKEN != "YOUR_X_ACCESS_TOKEN_HERE", 
+                    X_ACCESS_TOKEN_SECRET != "YOUR_X_ACCESS_TOKEN_SECRET_HERE"]):
+                x_client = tweepy.Client(
+                    consumer_key=X_API_KEY, 
+                    consumer_secret=X_API_SECRET,
+                    access_token=X_ACCESS_TOKEN, 
+                    access_token_secret=X_ACCESS_TOKEN_SECRET
+                )
+                platforms_available["x"] = True
+                logger.info("Successfully authenticated with X")
+            else:
+                logger.warning("X credentials not configured. X posting will be skipped.")
+        except Exception as e:
+            logger.error(f"X authentication error: {e}")
     
-    # Bluesky setup
-    try:
-        bsky_client = Client()
-        bsky_client.login(BLUESKY_USERNAME, BLUESKY_PASSWORD)
-        platforms_available["bluesky"] = True
-        logger.info("Successfully authenticated with Bluesky")
-    except Exception as e:
-        logger.error(f"Bluesky authentication error: {e}")
+    if target_platforms and 'bluesky' not in target_platforms:
+        logger.info("Bluesky platform not selected, skipping authentication")
+    else:
+        # Bluesky setup
+        try:
+            bsky_client = Client()
+            bsky_client.login(BLUESKY_USERNAME, BLUESKY_PASSWORD)
+            platforms_available["bluesky"] = True
+            logger.info("Successfully authenticated with Bluesky")
+        except Exception as e:
+            logger.error(f"Bluesky authentication error: {e}")
     
     return platforms_available
 
-def post_sentiment_summary(platform_limit=5, dry_run=False):
-    """Post positive sentiment insights to social media platforms"""
-    # Authenticate with platforms
-    platforms = authenticate_platforms()
+def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=None):
+    """Post positive sentiment insights to social media platforms
     
-    if not platforms["x"] and not platforms["bluesky"]:
+    Args:
+        platform_limit (int): Maximum number of posts per platform
+        dry_run (bool): If True, log posts without sending them
+        target_platforms (list): List of platforms to post to ('x', 'bluesky', or both)
+    """
+    # Authenticate with platforms
+    platforms = authenticate_platforms(target_platforms)
+    
+    active_platforms = [p for p, available in platforms.items() if available]
+    if not active_platforms:
         logger.error("No platforms available to post to. Exiting.")
         return False
+    logger.info(f"Active platforms: {', '.join(active_platforms)}")
     
     # Connect to database
     conn = get_db_connection()
@@ -83,6 +102,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False):
     
     try:
         cursor = conn.cursor()
+        # Use 7 days instead of 1 day
         seven_days_ago = datetime.now() - timedelta(days=7)
         
         # Query database for positive sentiment messages
@@ -110,7 +130,8 @@ def post_sentiment_summary(platform_limit=5, dry_run=False):
                 continue
                 
             snippet = content[:50] + '...' if len(content) > 50 else content
-            message = f"PulseCheck: {platform.capitalize()} users are buzzing positively about '{snippet}' (Confidence: {confidence:.2f})"
+            # Updated message format
+            message = f"PulseCheck Alert: {platform.capitalize()} buzzing with positivity: '{snippet}' (Score: {confidence:.2f})"
             
             # Post to X
             if platform == 'discord' and x_count < platform_limit and platforms["x"]:
@@ -151,7 +172,12 @@ def post_sentiment_summary(platform_limit=5, dry_run=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Post sentiment summaries to X and Bluesky')
     parser.add_argument('--dry-run', action='store_true', help='Log posts without sending them')
+    parser.add_argument('--platform', choices=['x', 'bluesky', 'both'], default='both', 
+                        help='Platform to post to (default: both)')
     args = parser.parse_args()
     
-    success = post_sentiment_summary(dry_run=args.dry_run)
+    # Convert platform argument to a list
+    target_platforms = None if args.platform == 'both' else [args.platform]
+    
+    success = post_sentiment_summary(dry_run=args.dry_run, target_platforms=target_platforms)
     sys.exit(0 if success else 1) 
