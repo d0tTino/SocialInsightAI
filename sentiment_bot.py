@@ -288,13 +288,14 @@ def authenticate_platforms(target_platforms=None, dry_run=False):
     
     return platforms_available
 
-async def collect_discord_messages(channel_id, limit=10, dry_run=True):
+async def collect_discord_messages(channel_id, limit=10, dry_run=True, simulate=False):
     """Collect messages from a specific Discord channel
     
     Args:
         channel_id (int): ID of the channel to collect from
         limit (int): Maximum number of messages to collect
         dry_run (bool): If True, just log without storing
+        simulate (bool): If True, use simulated data instead of real connection
         
     Returns:
         list: Collected messages
@@ -303,9 +304,9 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
         logger.error("Discord client not initialized")
         return []
     
-    # For dry run without actual Discord connection, return simulated data
-    if dry_run and not discord_client.is_ready():
-        logger.info("DRY-RUN: Using simulated Discord messages (client not ready)")
+    # For simulation without actual Discord connection
+    if simulate:
+        logger.info("SIMULATION: Using simulated Discord messages")
         simulated_messages = [
             {
                 "message_id": f"sim-{i}",
@@ -317,7 +318,7 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
             } for i in range(1, 4)
         ]
         for msg in simulated_messages:
-            logger.info(f"DRY-RUN: Collected from Discord: {msg['content']}")
+            logger.info(f"SIMULATION: Collected from Discord: {msg['content']}")
         return simulated_messages
     
     # Load processed IDs
@@ -365,9 +366,9 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
         return messages
     except Exception as e:
         logger.error(f"Error collecting Discord messages: {e}")
-        if dry_run:
+        if simulate:
             # Return simulated data for testing
-            logger.info("DRY-RUN: Using simulated Discord messages due to error")
+            logger.info("SIMULATION: Using simulated Discord messages due to error")
             simulated_messages = [
                 {
                     "message_id": f"sim-{i}",
@@ -379,7 +380,7 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
                 } for i in range(1, 4)
             ]
             for msg in simulated_messages:
-                logger.info(f"DRY-RUN: Collected from Discord: {msg['content']}")
+                logger.info(f"SIMULATION: Collected from Discord: {msg['content']}")
             return simulated_messages
         return []
 
@@ -736,7 +737,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
     
     return True
 
-async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel_id=None, interval_minutes=15):
+async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel_id=None, interval_minutes=15, simulate=False):
     """Run live collection from X and Discord
     
     Args:
@@ -744,6 +745,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         duration_minutes (int): How long to run collection for
         discord_channel_id (int): ID of Discord channel to collect from
         interval_minutes (int): Minutes between collection cycles
+        simulate (bool): If True, use simulated data instead of real connections
     """
     # Authenticate with platforms
     platforms = authenticate_platforms(['x', 'discord'], dry_run)
@@ -752,7 +754,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         logger.error("No platforms available for collection. Exiting.")
         return False
     
-    logger.info(f"Starting live collection for {duration_minutes} minutes (dry_run={dry_run}, interval={interval_minutes} minutes)")
+    logger.info(f"Starting live collection for {duration_minutes} minutes (dry_run={dry_run}, interval={interval_minutes} minutes, simulate={simulate})")
     
     start_time = datetime.now()
     end_time = start_time + timedelta(minutes=duration_minutes)
@@ -767,8 +769,8 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         # Start Discord client - try to login but don't block if it fails
         discord_task = None
         try:
-            if dry_run:
-                logger.info("DRY-RUN: Skipping actual Discord client login, using simulated data")
+            if simulate:
+                logger.info("SIMULATION: Skipping actual Discord client login, using simulated data")
             else:
                 discord_task = asyncio.create_task(discord_client.start(DISCORD_TOKEN))
         except Exception as e:
@@ -794,7 +796,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
             discord_count = 0
             if platforms["discord"] and discord_channel_id:
                 logger.info(f"Collecting from Discord channel {discord_channel_id}...")
-                discord_messages = await collect_discord_messages(discord_channel_id, limit=10, dry_run=dry_run)
+                discord_messages = await collect_discord_messages(discord_channel_id, limit=10, dry_run=dry_run, simulate=simulate)
                 if discord_messages:
                     discord_count = analyze_and_store_sentiment(discord_messages, "discord", dry_run=dry_run)
             
@@ -841,6 +843,8 @@ if __name__ == "__main__":
                         help='Discord channel ID for live collection')
     parser.add_argument('--interval', type=int, default=15,
                         help='Minutes between collection cycles (default: 15)')
+    parser.add_argument('--simulate', action='store_true',
+                        help='Use simulated data instead of real connections')
     args = parser.parse_args()
     
     # Convert platform argument to a list
@@ -860,7 +864,8 @@ if __name__ == "__main__":
             dry_run=args.dry_run,
             duration_minutes=args.duration,
             discord_channel_id=args.discord_channel,
-            interval_minutes=args.interval
+            interval_minutes=args.interval,
+            simulate=args.simulate
         ))
     else:
         # Run in regular posting mode
