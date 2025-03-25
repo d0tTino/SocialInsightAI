@@ -303,6 +303,23 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
         logger.error("Discord client not initialized")
         return []
     
+    # For dry run without actual Discord connection, return simulated data
+    if dry_run and not discord_client.is_ready():
+        logger.info("DRY-RUN: Using simulated Discord messages (client not ready)")
+        simulated_messages = [
+            {
+                "message_id": f"sim-{i}",
+                "content": f"This is a simulated Discord message #{i} for testing.",
+                "user_id": "123456789",
+                "timestamp": datetime.now().isoformat(),
+                "channel_id": str(channel_id),
+                "guild_id": "987654321"
+            } for i in range(1, 4)
+        ]
+        for msg in simulated_messages:
+            logger.info(f"DRY-RUN: Collected from Discord: {msg['content']}")
+        return simulated_messages
+    
     # Load processed IDs
     processed_data = load_processed_ids(PROCESSED_DISCORD_IDS_FILE, {"ids": []})
     processed_ids = set(processed_data["ids"])
@@ -348,6 +365,22 @@ async def collect_discord_messages(channel_id, limit=10, dry_run=True):
         return messages
     except Exception as e:
         logger.error(f"Error collecting Discord messages: {e}")
+        if dry_run:
+            # Return simulated data for testing
+            logger.info("DRY-RUN: Using simulated Discord messages due to error")
+            simulated_messages = [
+                {
+                    "message_id": f"sim-{i}",
+                    "content": f"This is a simulated Discord message #{i} for error recovery.",
+                    "user_id": "123456789",
+                    "timestamp": datetime.now().isoformat(),
+                    "channel_id": str(channel_id),
+                    "guild_id": "987654321"
+                } for i in range(1, 4)
+            ]
+            for msg in simulated_messages:
+                logger.info(f"DRY-RUN: Collected from Discord: {msg['content']}")
+            return simulated_messages
         return []
 
 def collect_x_mentions(limit=10, dry_run=True):
@@ -400,6 +433,24 @@ def collect_x_mentions(limit=10, dry_run=True):
         return collected
     except Exception as e:
         logger.error(f"Error collecting X mentions: {e}")
+        if "403 Forbidden" in str(e) and "different access level" in str(e):
+            logger.warning("X API access level insufficient - requires Elevated access for mentions_timeline")
+        
+        if dry_run:
+            # Return simulated data for testing
+            logger.info("DRY-RUN: Using simulated X mentions due to API limitations")
+            simulated_mentions = [
+                {
+                    "tweet_id": f"sim-{i}",
+                    "content": f"@SpeedoTino This is a simulated X mention #{i} for testing PulseCheck.",
+                    "user_id": "987654321",
+                    "user_screen_name": f"test_user_{i}",
+                    "timestamp": datetime.now().isoformat()
+                } for i in range(1, 4)
+            ]
+            for tweet in simulated_mentions:
+                logger.info(f"DRY-RUN: Collected from X: {tweet['content']}")
+            return simulated_mentions
         return []
 
 def analyze_and_store_sentiment(messages, platform, dry_run=True):
@@ -711,13 +762,24 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         async def on_ready():
             logger.info(f"Connected to Discord as {discord_client.user}")
         
-        # Start Discord client
-        discord_task = asyncio.create_task(discord_client.start(DISCORD_TOKEN))
+        # Start Discord client - try to login but don't block if it fails
+        discord_task = None
+        try:
+            if dry_run:
+                logger.info("DRY-RUN: Skipping actual Discord client login, using simulated data")
+            else:
+                discord_task = asyncio.create_task(discord_client.start(DISCORD_TOKEN))
+        except Exception as e:
+            logger.error(f"Error starting Discord client: {e}")
     else:
         discord_task = None
     
     try:
+        iteration = 0
         while datetime.now() < end_time:
+            iteration += 1
+            logger.info(f"Collection iteration {iteration} started")
+            
             # Collect from X (every 15 minutes, Twitter rate limits)
             if platforms["x"]:
                 logger.info("Collecting from X mentions...")
@@ -738,16 +800,19 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
                 break
                 
             remaining = (end_time - now).total_seconds()
-            sleep_time = min(60 * 15, remaining)  # Sleep for 15 minutes or remaining time
+            # For testing purposes, use shorter sleep intervals
+            sleep_time = min(60 * 1 if iteration < 3 else 60 * 15, remaining)  # First few iterations quicker
             
             logger.info(f"Waiting {sleep_time:.1f} seconds before next collection...")
             await asyncio.sleep(sleep_time)
     
+    except KeyboardInterrupt:
+        logger.info("Live collection interrupted by user")
     except Exception as e:
         logger.error(f"Error in live collection: {e}")
     finally:
         # Clean up Discord client
-        if discord_task:
+        if discord_task and not discord_task.done():
             discord_task.cancel()
         
         logger.info("Live collection completed")
