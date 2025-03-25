@@ -31,11 +31,12 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         return None
 
-def authenticate_platforms(target_platforms=None):
+def authenticate_platforms(target_platforms=None, dry_run=False):
     """Authenticate with X and Bluesky platforms, returning success status
     
     Args:
         target_platforms (list): List of platforms to authenticate with ('x', 'bluesky', or both)
+        dry_run (bool): If True, allow partial credentials for dry-run mode
     """
     global x_client, bsky_client
     platforms_available = {"x": False, "bluesky": False}
@@ -46,7 +47,11 @@ def authenticate_platforms(target_platforms=None):
     else:
         # X setup
         try:
-            if all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
+            # For dry run mode, consider X credentials configured if at least the API key is provided
+            if dry_run and X_API_KEY != "YOUR_X_API_KEY_HERE":
+                platforms_available["x"] = True
+                logger.info("Using placeholder X credentials for dry run")
+            elif all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
                     X_API_SECRET != "YOUR_X_API_SECRET_HERE",
                     X_ACCESS_TOKEN != "YOUR_X_ACCESS_TOKEN_HERE", 
                     X_ACCESS_TOKEN_SECRET != "YOUR_X_ACCESS_TOKEN_SECRET_HERE"]):
@@ -59,7 +64,10 @@ def authenticate_platforms(target_platforms=None):
                 platforms_available["x"] = True
                 logger.info("Successfully authenticated with X")
             else:
-                logger.warning("X credentials not configured. X posting will be skipped.")
+                logger.warning("X credentials not fully configured. X posting will be skipped in live mode.")
+                if dry_run:
+                    platforms_available["x"] = True
+                    logger.info("Using placeholder X credentials for dry run")
         except Exception as e:
             logger.error(f"X authentication error: {e}")
     
@@ -86,7 +94,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
         target_platforms (list): List of platforms to post to ('x', 'bluesky', or both)
     """
     # Authenticate with platforms
-    platforms = authenticate_platforms(target_platforms)
+    platforms = authenticate_platforms(target_platforms, dry_run)
     
     active_platforms = [p for p, available in platforms.items() if available]
     if not active_platforms:
@@ -102,39 +110,54 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
     
     try:
         cursor = conn.cursor()
-        # Use 7 days instead of 1 day
-        seven_days_ago = datetime.now() - timedelta(days=7)
+        # Use a much wider time window (30 days) to find more posts
+        discord_time_window = datetime.now() - timedelta(days=30)
+        bluesky_time_window = datetime.now() - timedelta(days=7)
         
-        # Query database for positive sentiment messages
-        cursor.execute("""
-            SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, COALESCE(dm.content, bp.content)
-            FROM sentiment_analysis sa
-            LEFT JOIN discord_messages dm ON sa.message_id = dm.message_id AND sa.platform = 'discord'
-            LEFT JOIN bluesky_posts bp ON sa.message_id = bp.post_id AND sa.platform = 'bluesky'
-            WHERE sa.sentiment = 'POSITIVE' AND sa.confidence > 0.8 AND COALESCE(dm.timestamp, bp.timestamp) > %s
-            ORDER BY COALESCE(dm.timestamp, bp.timestamp) DESC
-            LIMIT %s
-        """, (seven_days_ago, platform_limit * 2))
-        
-        posts = cursor.fetchall()
-        if not posts:
-            logger.info("No positive sentiment posts found within the time range.")
-            cursor.close()
-            conn.close()
-            return True
-        
-        x_count, bsky_count = 0, 0
-        
-        for msg_id, platform, sentiment, confidence, content in posts:
+        # First query for Discord posts
+        if not target_platforms or 'x' in target_platforms:
+            cursor.execute("""
+                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, dm.content, dm.timestamp
+                FROM sentiment_analysis sa
+                JOIN discord_messages dm ON sa.message_id = dm.message_id
+                WHERE sa.platform = 'discord' AND sa.sentiment = 'POSITIVE' AND sa.confidence > 0.8 
+                  AND dm.timestamp > %s
+                ORDER BY dm.timestamp DESC
+                LIMIT %s
+            """, (discord_time_window, platform_limit))
+            
+            discord_posts = cursor.fetchall()
+            logger.info(f"Found {len(discord_posts)} Discord posts with positive sentiment")
+        else:
+            discord_posts = []
+            
+        # Then query for Bluesky posts
+        if not target_platforms or 'bluesky' in target_platforms:
+            cursor.execute("""
+                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, bp.content, bp.timestamp
+                FROM sentiment_analysis sa
+                JOIN bluesky_posts bp ON sa.message_id = bp.post_id
+                WHERE sa.platform = 'bluesky' AND sa.sentiment = 'POSITIVE' AND sa.confidence > 0.8 
+                  AND bp.timestamp > %s
+                ORDER BY bp.timestamp DESC
+                LIMIT %s
+            """, (bluesky_time_window, platform_limit))
+            
+            bluesky_posts = cursor.fetchall()
+            logger.info(f"Found {len(bluesky_posts)} Bluesky posts with positive sentiment")
+        else:
+            bluesky_posts = []
+            
+        # Process Discord posts
+        x_count = 0
+        for msg_id, platform, sentiment, confidence, content, timestamp in discord_posts:
             if not content:
                 continue
                 
             snippet = content[:50] + '...' if len(content) > 50 else content
-            # Updated message format
             message = f"PulseCheck Alert: {platform.capitalize()} buzzing with positivity: '{snippet}' (Score: {confidence:.2f})"
             
-            # Post to X
-            if platform == 'discord' and x_count < platform_limit and platforms["x"]:
+            if platforms["x"]:
                 if dry_run:
                     logger.info(f"DRY-RUN: Would post to X: {message}")
                 else:
@@ -144,9 +167,17 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
                     except Exception as e:
                         logger.error(f"Error posting to X: {e}")
                 x_count += 1
+            
+        # Process Bluesky posts
+        bsky_count = 0
+        for msg_id, platform, sentiment, confidence, content, timestamp in bluesky_posts:
+            if not content:
+                continue
                 
-            # Post to Bluesky
-            elif platform == 'bluesky' and bsky_count < platform_limit and platforms["bluesky"]:
+            snippet = content[:50] + '...' if len(content) > 50 else content
+            message = f"PulseCheck Alert: {platform.capitalize()} buzzing with positivity: '{snippet}' (Score: {confidence:.2f})"
+            
+            if platforms["bluesky"]:
                 if dry_run:
                     logger.info(f"DRY-RUN: Would post to Bluesky: {message}")
                 else:
@@ -156,7 +187,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
                     except Exception as e:
                         logger.error(f"Error posting to Bluesky: {e}")
                 bsky_count += 1
-                
+        
         logger.info(f"Run complete: {x_count} X posts, {bsky_count} Bluesky posts {'(dry run)' if dry_run else ''}")
         
     except Exception as e:
@@ -174,10 +205,12 @@ if __name__ == "__main__":
     parser.add_argument('--dry-run', action='store_true', help='Log posts without sending them')
     parser.add_argument('--platform', choices=['x', 'bluesky', 'both'], default='both', 
                         help='Platform to post to (default: both)')
+    parser.add_argument('--count', type=int, default=5, 
+                        help='Number of posts per platform (default: 5)')
     args = parser.parse_args()
     
     # Convert platform argument to a list
     target_platforms = None if args.platform == 'both' else [args.platform]
     
-    success = post_sentiment_summary(dry_run=args.dry_run, target_platforms=target_platforms)
+    success = post_sentiment_summary(platform_limit=args.count, dry_run=args.dry_run, target_platforms=target_platforms)
     sys.exit(0 if success else 1) 

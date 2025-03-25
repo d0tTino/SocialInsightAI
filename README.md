@@ -59,6 +59,12 @@ A sentiment analysis and social media posting application that analyzes messages
    python sentiment_bot.py --platform both
    ```
 
+7. Control the number of posts per platform:
+   ```
+   python sentiment_bot.py --count 3
+   python sentiment_bot.py --dry-run --count 10
+   ```
+
 ## Features
 
 - Batch processing for efficiency
