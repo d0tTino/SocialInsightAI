@@ -133,6 +133,43 @@ def ensure_topics_column_exists():
         cursor.close()
         conn.close()
 
+def ensure_metadata_column_exists():
+    """Ensure the metadata column exists in the sentiment_analysis table"""
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Database connection failed")
+        return False
+    
+    try:
+        conn.autocommit = True
+        cursor = conn.cursor()
+        
+        # Check if the column already exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='sentiment_analysis' AND column_name='metadata'
+        """)
+        
+        if cursor.fetchone():
+            logger.info("Metadata column already exists in sentiment_analysis table")
+            return True
+        
+        # Add the metadata column
+        cursor.execute("""
+            ALTER TABLE sentiment_analysis 
+            ADD COLUMN metadata JSONB
+        """)
+        
+        logger.info("Successfully added metadata column to sentiment_analysis table")
+        return True
+    except Exception as e:
+        logger.error(f"Error ensuring metadata column: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
 def update_topics_in_database():
     """Update the topics column for all sentiment analysis records"""
     conn = get_db_connection()
@@ -468,10 +505,6 @@ def analyze_and_store_sentiment(messages, platform, dry_run=True):
     if not messages:
         return 0
     
-    if dry_run:
-        logger.info(f"DRY-RUN: Would analyze {len(messages)} {platform} messages")
-        return len(messages)
-    
     # Import HF transformer for sentiment analysis
     try:
         from transformers import pipeline
@@ -489,6 +522,10 @@ def analyze_and_store_sentiment(messages, platform, dry_run=True):
             return 0
         
         cursor = conn.cursor()
+        analyzed_count = 0
+        
+        # Ensure metadata column exists
+        ensure_metadata_column_exists()
         
         for msg in messages:
             content = msg.get("content", "")
@@ -508,6 +545,9 @@ def analyze_and_store_sentiment(messages, platform, dry_run=True):
                 
                 # Extract topics
                 topics = extract_topics(content)
+                
+                if dry_run:
+                    logger.info(f"DRY-RUN: Collected from {platform.capitalize()}: '{content[:100]}{'...' if len(content) > 100 else ''}' (Sentiment: {sentiment_label}, Score: {confidence:.2f}, Topics: {topics})")
                 
                 # Store in database based on platform
                 if platform == "discord":
@@ -529,18 +569,26 @@ def analyze_and_store_sentiment(messages, platform, dry_run=True):
                     # Then insert sentiment analysis
                     cursor.execute("""
                         INSERT INTO sentiment_analysis
-                        (message_id, platform, sentiment, confidence, topics)
-                        VALUES (%s, %s, %s, %s, %s)
+                        (message_id, platform, sentiment, confidence, topics, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (message_id, platform) DO UPDATE
                         SET sentiment = EXCLUDED.sentiment,
                             confidence = EXCLUDED.confidence,
-                            topics = EXCLUDED.topics
+                            topics = EXCLUDED.topics,
+                            metadata = EXCLUDED.metadata
                     """, (
                         msg["message_id"],
                         platform,
                         sentiment_label,
                         confidence,
-                        topics
+                        topics,
+                        json.dumps({
+                            "content": content,
+                            "user_id": msg["user_id"],
+                            "timestamp": msg["timestamp"],
+                            "channel_id": msg.get("channel_id", ""),
+                            "guild_id": msg.get("guild_id", "")
+                        })
                     ))
                 
                 elif platform == "x":
@@ -569,15 +617,20 @@ def analyze_and_store_sentiment(messages, platform, dry_run=True):
                         })
                     ))
                 
+                analyzed_count += 1
                 logger.info(f"Analyzed {platform} message: {sentiment_label} ({confidence:.2f})")
             
             except Exception as e:
                 logger.error(f"Error analyzing {platform} message {msg.get('message_id', 'unknown')}: {e}")
                 continue
         
-        conn.commit()
-        logger.info(f"Stored sentiment for {len(messages)} {platform} messages")
-        return len(messages)
+        if not dry_run:
+            conn.commit()
+            logger.info(f"Stored sentiment for {analyzed_count} {platform} messages")
+        else:
+            logger.info(f"DRY-RUN: Would analyze {analyzed_count} {platform} messages")
+        
+        return analyzed_count
     
     except Exception as e:
         logger.error(f"Error in sentiment analysis and storage: {e}")
