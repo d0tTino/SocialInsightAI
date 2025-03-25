@@ -761,7 +761,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
     if platforms["discord"] and discord_channel_id:
         @discord_client.event
         async def on_ready():
-            logger.info(f"Connected to Discord as {discord_client.user}")
+            logger.info(f"Connected to Discord as DeepThought#8885")
             logger.info(f"Monitoring channel {discord_channel_id} in server 348595593800843280")
         
         # Start Discord client - try to login but don't block if it fails
@@ -783,18 +783,23 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
             logger.info(f"Collection iteration {iteration} started")
             
             # Collect from X (every interval_minutes, Twitter rate limits)
+            x_count = 0
             if platforms["x"]:
                 logger.info("Collecting from X mentions...")
                 x_mentions = collect_x_mentions(limit=10, dry_run=dry_run)
                 if x_mentions:
-                    analyze_and_store_sentiment(x_mentions, "x", dry_run=dry_run)
+                    x_count = analyze_and_store_sentiment(x_mentions, "x", dry_run=dry_run)
             
             # Collect from Discord
+            discord_count = 0
             if platforms["discord"] and discord_channel_id:
                 logger.info(f"Collecting from Discord channel {discord_channel_id}...")
                 discord_messages = await collect_discord_messages(discord_channel_id, limit=10, dry_run=dry_run)
                 if discord_messages:
-                    analyze_and_store_sentiment(discord_messages, "discord", dry_run=dry_run)
+                    discord_count = analyze_and_store_sentiment(discord_messages, "discord", dry_run=dry_run)
+            
+            # Log cycle summary
+            logger.info(f"Cycle {iteration}: Collected {x_count} X mentions, {discord_count} Discord messages")
             
             # Calculate time remaining and sleep appropriately
             now = datetime.now()
@@ -844,13 +849,14 @@ if __name__ == "__main__":
     else:
         target_platforms = [args.platform]
     
+    success = False
     if args.live:
         # Run in live collection mode
         if not args.discord_channel:
             logger.error("Discord channel ID is required for live collection")
             sys.exit(1)
         
-        asyncio.run(run_live_collection(
+        success = asyncio.run(run_live_collection(
             dry_run=args.dry_run,
             duration_minutes=args.duration,
             discord_channel_id=args.discord_channel,
