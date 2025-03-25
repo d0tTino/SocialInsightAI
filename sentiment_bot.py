@@ -47,22 +47,25 @@ def authenticate_platforms(target_platforms=None, dry_run=False):
     else:
         # X setup
         try:
-            # For dry run mode, consider X credentials configured if at least the API key is provided
-            if dry_run and X_API_KEY != "YOUR_X_API_KEY_HERE":
-                platforms_available["x"] = True
-                logger.info("Using placeholder X credentials for dry run")
-            elif all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
+            # Only check if credentials are provided, not placeholder values
+            if all([X_API_KEY != "YOUR_X_API_KEY_HERE", 
                     X_API_SECRET != "YOUR_X_API_SECRET_HERE",
                     X_ACCESS_TOKEN != "YOUR_X_ACCESS_TOKEN_HERE", 
                     X_ACCESS_TOKEN_SECRET != "YOUR_X_ACCESS_TOKEN_SECRET_HERE"]):
-                x_client = tweepy.Client(
-                    consumer_key=X_API_KEY, 
-                    consumer_secret=X_API_SECRET,
-                    access_token=X_ACCESS_TOKEN, 
-                    access_token_secret=X_ACCESS_TOKEN_SECRET
-                )
-                platforms_available["x"] = True
-                logger.info("Successfully authenticated with X")
+                try:
+                    x_client = tweepy.Client(
+                        consumer_key=X_API_KEY, 
+                        consumer_secret=X_API_SECRET,
+                        access_token=X_ACCESS_TOKEN, 
+                        access_token_secret=X_ACCESS_TOKEN_SECRET
+                    )
+                    platforms_available["x"] = True
+                    logger.info("Successfully authenticated with X")
+                except Exception as e:
+                    logger.error(f"X authentication error with provided credentials: {e}")
+                    if dry_run:
+                        platforms_available["x"] = True
+                        logger.info("Using placeholder X credentials for dry run despite authentication error")
             else:
                 logger.warning("X credentials not fully configured. X posting will be skipped in live mode.")
                 if dry_run:
