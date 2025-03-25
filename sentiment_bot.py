@@ -7,6 +7,20 @@ import logging
 from datetime import datetime, timedelta
 import argparse
 import sys
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from collections import Counter
+import re
+import string
+
+# Download necessary NLTK resources
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -30,6 +44,103 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         return None
+
+def extract_topics(text, num_topics=2):
+    """Extract key topics from text using frequency analysis
+    
+    Args:
+        text (str): Text to analyze
+        num_topics (int): Maximum number of topics to extract
+        
+    Returns:
+        str: Comma-separated list of topics
+    """
+    if not text or len(text) < 5:
+        return "general"
+    
+    # Clean the text
+    text = text.lower()
+    text = re.sub(r'http\S+', '', text)  # Remove URLs
+    text = text.translate(str.maketrans('', '', string.punctuation))  # Remove punctuation
+    
+    # Tokenize and remove stopwords
+    stop_words = set(stopwords.words('english'))
+    additional_stops = {'just', 'like', 'get', 'got', 'know', 'yeah', 'dont', 'thats', 'really', 'going', 'think', 'said'}
+    stop_words.update(additional_stops)
+    
+    tokens = word_tokenize(text)
+    tokens = [word for word in tokens if word not in stop_words and len(word) > 3]
+    
+    # Count word frequencies
+    counter = Counter(tokens)
+    
+    # Get most common words as topics
+    topics = [word for word, count in counter.most_common(num_topics) if count > 0]
+    
+    # Return comma-separated topics or "general" if none found
+    result = ", ".join(topics)
+    
+    # Ensure result doesn't exceed 95 characters
+    if len(result) > 95:
+        result = result[:95]
+    
+    return result if topics else "general"
+
+def update_topics_in_database():
+    """Update the topics column for all sentiment analysis records"""
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Database connection failed")
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        
+        # First set all topics to NULL
+        cursor.execute("UPDATE sentiment_analysis SET topics = NULL WHERE topics IS NULL")
+        
+        # Process Discord messages
+        cursor.execute("""
+            SELECT sa.id, dm.content 
+            FROM sentiment_analysis sa
+            JOIN discord_messages dm ON sa.message_id = dm.message_id
+            WHERE sa.platform = 'discord' AND sa.topics IS NULL
+            LIMIT 10000
+        """)
+        discord_messages = cursor.fetchall()
+        
+        logger.info(f"Updating topics for {len(discord_messages)} Discord messages")
+        for record_id, content in discord_messages:
+            if content:
+                topics = extract_topics(content)
+                cursor.execute("UPDATE sentiment_analysis SET topics = %s WHERE id = %s", (topics, record_id))
+        
+        # Process Bluesky posts
+        cursor.execute("""
+            SELECT sa.id, bp.content 
+            FROM sentiment_analysis sa
+            JOIN bluesky_posts bp ON sa.message_id = bp.post_id
+            WHERE sa.platform = 'bluesky' AND sa.topics IS NULL
+            LIMIT 10000
+        """)
+        bluesky_posts = cursor.fetchall()
+        
+        logger.info(f"Updating topics for {len(bluesky_posts)} Bluesky posts")
+        for record_id, content in bluesky_posts:
+            if content:
+                topics = extract_topics(content)
+                cursor.execute("UPDATE sentiment_analysis SET topics = %s WHERE id = %s", (topics, record_id))
+        
+        conn.commit()
+        logger.info(f"Updated topics for {len(discord_messages) + len(bluesky_posts)} messages")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating topics: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        conn.close()
 
 def authenticate_platforms(target_platforms=None, dry_run=False):
     """Authenticate with X and Bluesky platforms, returning success status
@@ -112,6 +223,10 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
         return False
     
     try:
+        # First update topics for messages without topics
+        logger.info("Checking and updating topics for messages")
+        update_topics_in_database()
+        
         cursor = conn.cursor()
         # Use a much wider time window (30 days) to find more posts
         discord_time_window = datetime.now() - timedelta(days=30)
@@ -120,7 +235,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
         # First query for Discord posts
         if not target_platforms or 'x' in target_platforms:
             cursor.execute("""
-                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, dm.content, dm.timestamp
+                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, dm.content, dm.timestamp, sa.topics
                 FROM sentiment_analysis sa
                 JOIN discord_messages dm ON sa.message_id = dm.message_id
                 WHERE sa.platform = 'discord' AND sa.sentiment = 'POSITIVE' AND sa.confidence > 0.8 
@@ -137,7 +252,7 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
         # Then query for Bluesky posts
         if not target_platforms or 'bluesky' in target_platforms:
             cursor.execute("""
-                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, bp.content, bp.timestamp
+                SELECT sa.message_id, sa.platform, sa.sentiment, sa.confidence, bp.content, bp.timestamp, sa.topics
                 FROM sentiment_analysis sa
                 JOIN bluesky_posts bp ON sa.message_id = bp.post_id
                 WHERE sa.platform = 'bluesky' AND sa.sentiment = 'POSITIVE' AND sa.confidence > 0.8 
@@ -153,16 +268,29 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
             
         # Process Discord posts
         x_count = 0
-        for msg_id, platform, sentiment, confidence, content, timestamp in discord_posts:
+        for msg_id, platform, sentiment, confidence, content, timestamp, topics in discord_posts:
             if not content:
                 continue
+            
+            # Get topics if not already present
+            if not topics:
+                topics = extract_topics(content)
+                # Update database with topics
+                cursor.execute("""
+                    UPDATE sentiment_analysis 
+                    SET topics = %s 
+                    WHERE message_id = %s AND platform = %s
+                """, (topics, msg_id, platform))
+                conn.commit()
                 
             snippet = content[:50] + '...' if len(content) > 50 else content
-            message = f"PulseCheck Alert: {platform.capitalize()} buzzing with positivity: '{snippet}' (Score: {confidence:.2f})"
+            topic_text = f"about {topics}" if topics else ""
+            message = f"PulseCheck Alert: {platform.capitalize()} buzzing {topic_text}: '{snippet}' (Score: {confidence:.2f})"
             
             if platforms["x"]:
                 if dry_run:
                     logger.info(f"DRY-RUN: Would post to X: {message}")
+                    logger.info(f"DRY-RUN: Full content: {content}")
                 else:
                     try:
                         x_client.create_tweet(text=message)
@@ -173,16 +301,29 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
             
         # Process Bluesky posts
         bsky_count = 0
-        for msg_id, platform, sentiment, confidence, content, timestamp in bluesky_posts:
+        for msg_id, platform, sentiment, confidence, content, timestamp, topics in bluesky_posts:
             if not content:
                 continue
                 
+            # Get topics if not already present
+            if not topics:
+                topics = extract_topics(content)
+                # Update database with topics
+                cursor.execute("""
+                    UPDATE sentiment_analysis 
+                    SET topics = %s 
+                    WHERE message_id = %s AND platform = %s
+                """, (topics, msg_id, platform))
+                conn.commit()
+                
             snippet = content[:50] + '...' if len(content) > 50 else content
-            message = f"PulseCheck Alert: {platform.capitalize()} buzzing with positivity: '{snippet}' (Score: {confidence:.2f})"
+            topic_text = f"about {topics}" if topics else ""
+            message = f"PulseCheck Alert: {platform.capitalize()} buzzing {topic_text}: '{snippet}' (Score: {confidence:.2f})"
             
             if platforms["bluesky"]:
                 if dry_run:
                     logger.info(f"DRY-RUN: Would post to Bluesky: {message}")
+                    logger.info(f"DRY-RUN: Full content: {content}")
                 else:
                     try:
                         bsky_client.send_post(text=message)
