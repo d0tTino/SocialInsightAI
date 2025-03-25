@@ -736,13 +736,14 @@ def post_sentiment_summary(platform_limit=5, dry_run=False, target_platforms=Non
     
     return True
 
-async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel_id=None):
+async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel_id=None, interval_minutes=15):
     """Run live collection from X and Discord
     
     Args:
         dry_run (bool): If True, just log without posting
         duration_minutes (int): How long to run collection for
         discord_channel_id (int): ID of Discord channel to collect from
+        interval_minutes (int): Minutes between collection cycles
     """
     # Authenticate with platforms
     platforms = authenticate_platforms(['x', 'discord'], dry_run)
@@ -751,7 +752,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         logger.error("No platforms available for collection. Exiting.")
         return False
     
-    logger.info(f"Starting live collection for {duration_minutes} minutes (dry_run={dry_run})")
+    logger.info(f"Starting live collection for {duration_minutes} minutes (dry_run={dry_run}, interval={interval_minutes} minutes)")
     
     start_time = datetime.now()
     end_time = start_time + timedelta(minutes=duration_minutes)
@@ -761,6 +762,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
         @discord_client.event
         async def on_ready():
             logger.info(f"Connected to Discord as {discord_client.user}")
+            logger.info(f"Monitoring channel {discord_channel_id} in server 348595593800843280")
         
         # Start Discord client - try to login but don't block if it fails
         discord_task = None
@@ -780,7 +782,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
             iteration += 1
             logger.info(f"Collection iteration {iteration} started")
             
-            # Collect from X (every 15 minutes, Twitter rate limits)
+            # Collect from X (every interval_minutes, Twitter rate limits)
             if platforms["x"]:
                 logger.info("Collecting from X mentions...")
                 x_mentions = collect_x_mentions(limit=10, dry_run=dry_run)
@@ -801,7 +803,7 @@ async def run_live_collection(dry_run=True, duration_minutes=30, discord_channel
                 
             remaining = (end_time - now).total_seconds()
             # For testing purposes, use shorter sleep intervals
-            sleep_time = min(60 * 1 if iteration < 3 else 60 * 15, remaining)  # First few iterations quicker
+            sleep_time = min(60 * 1 if iteration < 3 else 60 * interval_minutes, remaining)  # First few iterations quicker
             
             logger.info(f"Waiting {sleep_time:.1f} seconds before next collection...")
             await asyncio.sleep(sleep_time)
@@ -832,6 +834,8 @@ if __name__ == "__main__":
                         help='Duration in minutes for live collection (default: 30)')
     parser.add_argument('--discord-channel', type=int,
                         help='Discord channel ID for live collection')
+    parser.add_argument('--interval', type=int, default=15,
+                        help='Minutes between collection cycles (default: 15)')
     args = parser.parse_args()
     
     # Convert platform argument to a list
@@ -849,7 +853,8 @@ if __name__ == "__main__":
         asyncio.run(run_live_collection(
             dry_run=args.dry_run,
             duration_minutes=args.duration,
-            discord_channel_id=args.discord_channel
+            discord_channel_id=args.discord_channel,
+            interval_minutes=args.interval
         ))
     else:
         # Run in regular posting mode
